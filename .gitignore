@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- Project-local artifacts (Fake-TCP / URFT) ---
+# Received files written by server into repo root (same basename as sent file)
+alice.txt
+lorem.txt
+src.bin
+
+# Local run outputs
+client.out
+server.out
+test_results/
+
+# Optional local helper scripts may create temp binaries
+__urft_tmp_*.bin
