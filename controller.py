@@ -6,11 +6,7 @@ import time
 from typing import Optional, Tuple
 
 
-# URFT: UDP-based Reliable File Transfer (assignment)
-# - UDP only, single server socket
-# - Reliable over loss/dup/reordering
-# - Client sends filename first (META), then DATA, then END
-# - Go-Back-N with cumulative ACKs
+# URFT over UDP.
 
 
 MAGIC = b"URFT"
@@ -20,12 +16,11 @@ TYPE_DATA = 2
 TYPE_END = 3
 TYPE_ACK = 4
 
-# Packet header:
-#   magic(4), type(1), seq(4), ack(4), payload_len(2)
+# Header: magic, type, seq, ack, payload_len
 _HDR = struct.Struct("!4sBIIH")
 HDR_LEN = _HDR.size
 
-# Keep UDP datagrams well under typical MTU (simple + safe).
+# Keep packet size below MTU.
 MAX_PACKET = 1400
 MAX_PAYLOAD = MAX_PACKET - HDR_LEN
 
@@ -66,10 +61,7 @@ class _UDPEndpoint:
 
 
 class Server:
-    """
-    URFT server (UDP) that receives exactly one file then exits.
-    Uses a single UDP socket as required.
-    """
+    """URFT UDP server for one file."""
 
     def __init__(self, server_ip: str, server_port: int):
         self.__server_ip = server_ip
@@ -82,7 +74,7 @@ class Server:
     def receive(self) -> str:
         print(f"Server listening on {self.__server_ip}:{self.__server_port} (URFT/UDP)...")
 
-        # Phase 1: receive META (seq=0) to learn filename and size.
+        # Get META (seq=0).
         client_addr: Optional[Tuple[str, int]] = None
         expected_seq = 0
         file_name: Optional[str] = None
@@ -96,18 +88,18 @@ class Server:
             if client_addr is None:
                 client_addr = addr
             if addr != client_addr:
-                # Single-client requirement: ignore others.
+                # Ignore other clients.
                 continue
 
             ptype, seq, _ack, payload = msg
             if ptype != TYPE_META or seq != 0:
-                # Not ready yet: ACK current expectation.
+                # ACK current expected seq.
                 self.__ep.sendto(TYPE_ACK, client_addr, ack=expected_seq)
                 continue
 
             try:
                 meta = payload.decode("utf-8", errors="strict")
-                # Format: "<filename>\n<filesize>\n"
+                # META: "<filename>\n<filesize>\n"
                 parts = meta.split("\n")
                 raw_name = parts[0].strip()
                 raw_size = parts[1].strip()
@@ -120,7 +112,7 @@ class Server:
                 if not file_name:
                     raise ValueError("invalid filename")
             except Exception:
-                # Bad metadata; keep waiting for a valid META.
+                # Skip bad META.
                 continue
 
             expected_seq = 1
@@ -129,14 +121,14 @@ class Server:
 
         assert client_addr is not None and file_name is not None and expected_size is not None
 
-        # Phase 2: receive DATA/END. Go-Back-N receiver: accept only in-order.
+        # Receive DATA and END in order.
         received_bytes = 0
         out_path = file_name
         with open(out_path, "wb") as f:
             while True:
                 msg, addr = self.__ep.recvfrom(timeout_s=1.0)
                 if msg is None or addr is None:
-                    # Re-ACK in case ACK was lost.
+                    # Re-send ACK.
                     self.__ep.sendto(TYPE_ACK, client_addr, ack=expected_seq)
                     continue
                 if addr != client_addr:
@@ -148,21 +140,21 @@ class Server:
                         f.write(payload)
                         received_bytes += len(payload)
                         expected_seq += 1
-                    # Cumulative ACK for next expected seq (handles dup/reorder).
+                    # ACK next expected seq.
                     self.__ep.sendto(TYPE_ACK, client_addr, ack=expected_seq)
                     continue
 
                 if ptype == TYPE_END:
-                    # Only finish if END is in-order.
+                    # Finish only if END is in order and size matches.
                     if seq == expected_seq and received_bytes == expected_size:
                         expected_seq += 1
                         self.__ep.sendto(TYPE_ACK, client_addr, ack=expected_seq)
                         break
-                    # Otherwise keep ACKing the expected sequence number.
+                    # Keep ACKing expected seq.
                     self.__ep.sendto(TYPE_ACK, client_addr, ack=expected_seq)
                     continue
 
-                # Unknown packet: just ACK.
+                # ACK unknown packet.
                 self.__ep.sendto(TYPE_ACK, client_addr, ack=expected_seq)
 
         print(f"Saved received file to {out_path} ({received_bytes} bytes)")
@@ -170,9 +162,7 @@ class Server:
 
 
 class Client:
-    """
-    URFT client (UDP) that sends one file then exits.
-    """
+    """URFT UDP client for one file."""
 
     def __init__(self, server_ip: str, server_port: int):
         self.__server_ip = server_ip
@@ -183,7 +173,7 @@ class Client:
         self.__server_addr = (self.__server_ip, self.__server_port)
 
     def send_message(self, message: str) -> None:
-        # Backwards-compatible entry point used by urft_client.py
+        # Legacy entry point.
         self.send_file(message)
 
     def send_file(
@@ -198,24 +188,24 @@ class Client:
 
         meta_payload = f"{file_name}\n{file_size}\n".encode("utf-8")
 
-        # Stop-and-wait for META (seq=0)
+        # Send META until ACK 1.
         while True:
             t0 = time.monotonic()
             self.__ep.sendto(TYPE_META, self.__server_addr, seq=0, payload=meta_payload)
             msg, _ = self.__ep.recvfrom(timeout_s=timeout_s)
             if msg and msg[0] == TYPE_ACK and msg[2] == 1:
-                # Calibrate timeout for high-RTT tests (e.g., 250ms).
+                # Update timeout from RTT.
                 rtt = max(0.0, time.monotonic() - t0)
-                # Conservative RTO: scales with RTT, bounded to avoid runaway.
                 timeout_s = max(timeout_s, min(1.5, 2.5 * rtt + 0.05))
                 break
 
-        # Go-Back-N for DATA packets starting at seq=1.
+        # Send DATA with Go-Back-N.
         base = 1
         next_seq = 1
         def _send(seq: int, payload: bytes) -> None:
             self.__ep.sendto(TYPE_DATA, self.__server_addr, seq=seq, payload=payload)
 
+        # Split file into chunks.
         with open(file_path, "rb") as f:
             chunks = []
             while True:
@@ -228,25 +218,25 @@ class Client:
         eof_seq = 1 + total_chunks
 
         while base < eof_seq:
-            # Fill window
+            # Send current window.
             while next_seq < eof_seq and next_seq < base + max(1, int(window_size)):
                 _send(next_seq, chunks[next_seq - 1])
                 next_seq += 1
 
-            # Wait for ACK or timeout.
+            # Wait for ACK or timeout
             msg, _ = self.__ep.recvfrom(timeout_s=timeout_s)
             if msg and msg[0] == TYPE_ACK:
-                # Cumulative ACK: next expected data seq.
+                # Move window with cumulative ACK.
                 ack = msg[2]
                 if ack > base:
                     base = ack
                 continue
 
-            # Timeout: retransmit from base (GBN).
+            # Timeout: resend unacked packets.
             for s in range(base, next_seq):
                 _send(s, chunks[s - 1])
 
-        # END handshake (seq=eof_seq)
+        # Send END until final ACK.
         while True:
             self.__ep.sendto(TYPE_END, self.__server_addr, seq=eof_seq)
             msg, _ = self.__ep.recvfrom(timeout_s=timeout_s)

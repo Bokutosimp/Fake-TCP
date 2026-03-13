@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# URFT network test runner (PDF-style netem cases)
-#
-# Usage:
-#   ./test_network.sh <file_path>
-#
-# Notes:
-# - Requires: python3, md5sum, sudo, and `tc` (iproute2).
-# - Uses loopback (lo). netem settings apply in both directions on lo.
+# URFT network tests.
+# Usage: ./test_network.sh <file_path>
+# Needs: python3, md5sum, sudo, tc.
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TEST_FILE="${1:-testfiles/alice.txt}"
@@ -18,7 +13,7 @@ TMP_5M_FILE=""
 
 cleanup() {
   sudo tc qdisc del dev lo root 2>/dev/null || true
-  # Remove the received output file (server writes basename of TEST_FILE).
+  # Remove output file.
   rm -f "$(basename "$TEST_FILE")" 2>/dev/null || true
   if [[ -n "$TMP_5M_FILE" ]]; then
     rm -f "$TMP_5M_FILE" 2>/dev/null || true
@@ -80,20 +75,16 @@ run_test() {
 
   rm -f "$(basename "$TEST_FILE")" 2>/dev/null || true
 
-  # Start server (single run, single file).
   "$PYTHON_BIN" urft_server.py "$SERVER_IP" "$SERVER_PORT" >/dev/null 2>&1 &
   local server_pid=$!
 
-  # Give server time to bind.
   sleep 0.6
 
-  # Run client.
   set +e
   "$PYTHON_BIN" urft_client.py "$TEST_FILE" "$SERVER_IP" "$SERVER_PORT" >/dev/null 2>&1
   local client_rc=$?
   set -e
 
-  # Wait server to exit.
   set +e
   wait "$server_pid"
   local server_rc=$?
@@ -130,7 +121,7 @@ echo "Test file: $TEST_FILE"
 echo "Server: ${SERVER_IP}:${SERVER_PORT}"
 echo ""
 
-# PDF table uses RTT; `tc netem delay` is one-way on the interface, so we use RTT/2.
+# Use RTT/2 because netem delay is one-way.
 run_test "1_1MiB_rtt10_noimpair" 5 0 0 0
 run_test "2_1MiB_rtt10_dup2" 5 0 2 0
 run_test "3_1MiB_rtt10_loss2" 5 2 0 0
@@ -139,9 +130,9 @@ run_test "5_1MiB_rtt10_loss5" 5 5 0 0
 run_test "6_1MiB_rtt250_noimpair" 125 0 0 0
 run_test "7_1MiB_rtt250_reorder2" 125 0 0 2
 
-# Test #8 in PDF is asymmetric loss (C->S 5%, S->C 2%) and 5 MiB at RTT 100ms.
-# On loopback with a single netem qdisc, we can only emulate symmetric impairment.
-# We run a conservative symmetric-loss variant (5% both directions) with a 5 MiB file.
+# Case 8 is asymmetric in the PDF.
+# On loopback we can only do symmetric loss.
+# So this runs 5% loss both ways with a 5 MiB file.
   TMP_5M_FILE="$(mktemp -t urft_5m_XXXXXX.bin)"
   dd if=/dev/urandom of="$TMP_5M_FILE" bs=1M count=5 status=none
   TEST_FILE_5M="${TEST_FILE_5M:-$TMP_5M_FILE}"
